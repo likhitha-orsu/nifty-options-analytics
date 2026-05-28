@@ -4,14 +4,37 @@ import requests
 import streamlit as st
 import pandas as pd
 import numpy as np
-from dotenv import load_dotenv
 from dhanhq import DhanContext, dhanhq
 from modules.rules import get_trend, interpret_rsi, interpret_delta, interpret_vega
 
-# ── Credentials ───────────────────────────────────────────────────────────────
-load_dotenv()
-CLIENT_ID    = os.environ.get("DHAN_CLIENT_ID", "")
-ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN", "")
+st.set_page_config(page_title="Market Intelligence Console", layout="wide")
+if "dhan_authenticated" not in st.session_state:
+    st.session_state["dhan_authenticated"] = False
+    st.session_state["client_id"] = ""
+    st.session_state["access_token"] = ""
+
+if not st.session_state["dhan_authenticated"]:
+    st.title("🔐 Connect to Dhan API")
+    st.markdown("Because Dhan API keys refresh frequently, please input your current credentials below to launch the console.")
+    
+    with st.form("dhan_login_form"):
+        input_client_id = st.text_input("Dhan Client ID", value=st.session_state["client_id"], help="Enter your Dhan Client ID")
+        input_token = st.text_input("Access Token", value=st.session_state["access_token"], type="password", help="Enter your 0-day or valid Access Token")
+        submit_btn = st.form_submit_button("Launch Dashboard")
+        
+        if submit_btn:
+            if input_client_id.strip() == "" or input_token.strip() == "":
+                st.error("Both Client ID and Access Token are required.")
+            else:
+                # Store in session state
+                st.session_state["client_id"] = input_client_id.strip()
+                st.session_state["access_token"] = input_token.strip()
+                st.session_state["dhan_authenticated"] = True
+                st.rerun()
+    st.stop() 
+
+CLIENT_ID    = st.session_state["client_id"]
+ACCESS_TOKEN = st.session_state["access_token"]
 BASE_URL     = "https://api.dhan.co/v2"
 
 # NIFTY index scrip details on Dhan
@@ -20,17 +43,6 @@ NIFTY_SEG     = "IDX_I"     # Segment for index
 NIFTY_SEC_ID  = "13"        # securityId string for LTP call
 NSE_EQ_SEG    = "NSE_EQ"
 
-# ── Page config ───────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Market Intelligence Console", layout="wide")
-st.title("Market Intelligence Dashboard")
-st.markdown("*A tabular decision-support console for NIFTY options — powered by live Dhan data.*")
-
-# ── Guard: credentials check ──────────────────────────────────────────────────
-if not CLIENT_ID or not ACCESS_TOKEN:
-    st.error("DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN missing. Fill in your .env file and restart.")
-    st.stop()
-
-# ── Dhan helpers ──────────────────────────────────────────────────────────────
 def _headers() -> dict:
     return {
         "Accept": "application/json",
@@ -49,7 +61,6 @@ def _get(path: str):
     r.raise_for_status()
     return r.json()
 
-# ── Live data fetchers ────────────────────────────────────────────────────────
 @st.cache_data(ttl=60)   # refresh every 60 seconds
 def fetch_nifty_ltp() -> float:
     """Fetch live NIFTY spot price."""
@@ -80,7 +91,7 @@ def fetch_option_chain(expiry: str) -> pd.DataFrame:
 
     rows = []
     chain_data = resp.get("data", {})
-    oc = chain_data.get("oc", {})          # dict keyed by strike price string
+    oc = chain_data.get("oc", {})          
 
     for strike_str, v in oc.items():
         strike = float(strike_str)
@@ -128,7 +139,6 @@ def fetch_intraday_history() -> pd.DataFrame:
     df = pd.DataFrame({"close": closes})
     return df
 
-# ── Technical indicators ──────────────────────────────────────────────────────
 def calc_rsi(series: pd.Series, period: int = 14) -> float:
     if len(series) < period + 1:
         return 50.0
@@ -189,22 +199,37 @@ def auto_regime(spot: float, ema20: float, ema50: float,
     info_line  = f"**Market Structure:** {structure} | **Volatility:** {vol_regime} | **Positioning:** {positioning}"
     return info_line, playbook
 
-# ── Sidebar controls ──────────────────────────────────────────────────────────
+st.title("Market Intelligence Dashboard")
+st.markdown("*A tabular decision-support console for NIFTY options — powered by live Dhan data.*")
+
 st.sidebar.header("Live Controls")
+
+if st.sidebar.button("🚪 Disconnect API Keys"):
+    st.session_state["dhan_authenticated"] = False
+    st.session_state["client_id"] = ""
+    st.session_state["access_token"] = ""
+    st.cache_data.clear()
+    st.rerun()
 
 if st.sidebar.button("🔄 Refresh Data"):
     st.cache_data.clear()
     st.rerun()
 
-expiries = fetch_expiry_list()
-if not expiries:
-    st.error("Could not fetch expiry list from Dhan. Check your token.")
+try:
+    expiries = fetch_expiry_list()
+    if not expiries:
+        st.error("Could not fetch expiry list from Dhan. Verify your credentials in the console.")
+        st.stop()
+except Exception as e:
+    st.error(f"Authentication failed or invalid token: {e}")
+    if st.button("Re-enter Credentials"):
+        st.session_state["dhan_authenticated"] = False
+        st.rerun()
     st.stop()
 
 selected_expiry = st.sidebar.selectbox("Select Expiry", expiries)
 strike_range    = st.sidebar.slider("Strikes around ATM (±N)", min_value=5, max_value=20, value=10)
 
-# ── Fetch live data ───────────────────────────────────────────────────────────
 try:
     nifty_spot = fetch_nifty_ltp()
 except Exception as e:
@@ -219,7 +244,6 @@ except Exception as e:
 
 hist_df = fetch_intraday_history()
 
-# Derived values
 atm_strike  = find_atm(nifty_spot, chain_df["strike"])
 day_chg     = day_change_pct(hist_df)
 closes      = hist_df["close"] if not hist_df.empty else pd.Series([nifty_spot])
@@ -229,7 +253,6 @@ ema50       = calc_ema(closes, 50)
 roc_val     = calc_roc(closes)
 now_str     = datetime.datetime.now().strftime("%H:%M:%S")
 
-# Filter chain to ±N strikes around ATM
 all_strikes  = sorted(chain_df["strike"].unique())
 atm_idx      = all_strikes.index(atm_strike)
 low_idx      = max(0, atm_idx - strike_range)
@@ -237,14 +260,12 @@ high_idx     = min(len(all_strikes) - 1, atm_idx + strike_range)
 nearby_strikes = all_strikes[low_idx:high_idx + 1]
 filtered_df  = chain_df[chain_df["strike"].isin(nearby_strikes)]
 
-# ATM row
 atm_row = chain_df[chain_df["strike"] == atm_strike]
 if atm_row.empty:
     st.error("ATM strike not found in option chain.")
     st.stop()
 atm = atm_row.iloc[0]
 
-# ── Section 1: Market Context ─────────────────────────────────────────────────
 st.header("1. Market Context")
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("NIFTY Spot",  f"{nifty_spot:.2f}")
@@ -253,7 +274,6 @@ col3.metric("Time",        now_str)
 col4.metric("Day Change",  day_chg)
 st.divider()
 
-# ── Section 2: Underlying NIFTY State ────────────────────────────────────────
 st.header("2. Underlying (NIFTY State)")
 rsi_interp, rsi_bias = interpret_rsi(rsi_val)
 
@@ -278,7 +298,6 @@ nifty_state_data = {
 st.dataframe(pd.DataFrame(nifty_state_data), width="stretch", hide_index=True)
 st.divider()
 
-# ── Section 3: ATM Analysis ───────────────────────────────────────────────────
 st.header("3. ATM Analysis")
 col1, col2 = st.columns(2)
 
@@ -312,7 +331,6 @@ with col2:
 
 st.divider()
 
-# ── Section 4: Cumulative Greeks ──────────────────────────────────────────────
 st.header(f"4. Cumulative Greeks (±{strike_range} Strikes around ATM)")
 st.markdown("Aggregated risk exposure across the filtered chain.")
 
@@ -341,7 +359,6 @@ greeks_table = {
 }
 st.dataframe(pd.DataFrame(greeks_table), width="stretch", hide_index=True)
 
-# OI summary
 total_call_oi = filtered_df["call_oi"].sum()
 total_put_oi  = filtered_df["put_oi"].sum()
 pcr           = total_put_oi / total_call_oi if total_call_oi > 0 else 0
@@ -351,7 +368,6 @@ c2.metric("Total Put OI",  f"{total_put_oi:,.0f}")
 c3.metric("PCR (Put/Call OI)", f"{pcr:.2f}")
 st.divider()
 
-# ── Section 5: Full Option Chain Table ───────────────────────────────────────
 st.header("5. Option Chain (Filtered Strikes)")
 display_chain = filtered_df[[
     "strike", "call_premium", "call_oi", "call_iv",
@@ -373,8 +389,6 @@ st.dataframe(
     width="stretch", hide_index=True
 )
 st.divider()
-
-# ── Section 6: Auto Regime Box ────────────────────────────────────────────────
 st.header("6. Auto Interpretation & Regime Box")
 info_line, playbook = auto_regime(
     nifty_spot, ema20, ema50, rsi_val,
