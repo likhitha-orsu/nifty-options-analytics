@@ -7,16 +7,14 @@ import numpy as np
 from dhanhq import DhanContext, dhanhq
 from modules.rules import get_trend, interpret_rsi, interpret_delta, interpret_vega
 
-st.set_page_config(page_title="Market Intelligence Console", layout="wide")
+st.set_page_config(page_title="Market Intelligence Dashboard", layout="wide")
 if "dhan_authenticated" not in st.session_state:
     st.session_state["dhan_authenticated"] = False
     st.session_state["client_id"] = ""
     st.session_state["access_token"] = ""
 
 if not st.session_state["dhan_authenticated"]:
-    st.title("🔐 Connect to Dhan API")
-    st.markdown("Because Dhan API keys refresh frequently, please input your current credentials below to launch the console.")
-    
+    st.title(" Connect to Dhan API")
     with st.form("dhan_login_form"):
         input_client_id = st.text_input("Dhan Client ID", value=st.session_state["client_id"], help="Enter your Dhan Client ID")
         input_token = st.text_input("Access Token", value=st.session_state["access_token"], type="password", help="Enter your 0-day or valid Access Token")
